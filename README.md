@@ -36,6 +36,7 @@ cargo run --release
    * **C** - Toggle between the Composite View (Average of all 50 channels) and Single Channel View.
 
    * **UP / DOWN (or W/S / Arrows)** - Cycle through the 50 individual Quantum Channels.
+   * **M** - Swap between raw data display and Git-Style branch display.
 
 **Live Engine Tuning**
 
