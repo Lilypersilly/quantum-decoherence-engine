@@ -65,7 +65,8 @@ impl QuantumState {
 /// A continuous history of a specific gameplay attempt.
 struct Worldline {
     id: usize,
-    branch_tick: usize, // The tick where this branch split from the previous run
+    parent_id: Option<usize>, // Which timeline this branched from
+    branch_tick: usize,       // The tick where this branch split from the previous run
     states: Vec<QuantumState>, // The played history (T1..=End of this run)
     divergence_angle: Option<f32>,
 }
@@ -96,6 +97,7 @@ struct Simulation {
     // UI & State Toggles
     paused: bool,
     show_npc_window: bool,
+    git_tree_mode: bool, // Toggles standard values view vs Git-style branch tree
     frame_counter: u32,
     last_divergence_readout: Option<f32>,
     view_mode: ViewMode,
@@ -114,13 +116,13 @@ impl Simulation {
         start_gravity_weight: f32,
         view_mode: ViewMode,
         show_npc_window: bool,
+        git_tree_mode: bool,
     ) -> Self {
         rand::srand(miniquad::date::now() as u64);
 
         let mut initial_values = [0.0; NUM_CHANNELS];
         let mut bounds = [Bounds { min: 0.0, max: 0.0 }; NUM_CHANNELS];
 
-        // Seed 50 independent quantum channels
         for i in 0..NUM_CHANNELS {
             let start_val = rand::gen_range(0, 100) as f32;
             initial_values[i] = start_val;
@@ -144,6 +146,7 @@ impl Simulation {
 
         let active_worldline = Worldline {
             id: 0,
+            parent_id: None,
             branch_tick: 1,
             states: vec![t1_state],
             divergence_angle: None,
@@ -158,6 +161,7 @@ impl Simulation {
             active_worldline,
             paused: false,
             show_npc_window,
+            git_tree_mode,
             frame_counter: 0,
             last_divergence_readout: None,
             view_mode,
@@ -168,7 +172,6 @@ impl Simulation {
         }
     }
 
-    /// Computes a single state frame, merging random drift with Ghost gravity.
     fn compute_next_state(
         &self,
         prev_state: &QuantumState,
@@ -179,7 +182,6 @@ impl Simulation {
         let mut new_values = [0.0; NUM_CHANNELS];
         let mut new_momentums = [0.0; NUM_CHANNELS];
 
-        // 1. Calculate the raw numerical drift for all 50 channels
         for i in 0..NUM_CHANNELS {
             let current = prev_state.values[i];
             let momentum = prev_state.momentums[i];
@@ -209,11 +211,9 @@ impl Simulation {
             new_momentums[i] = next_val - current;
         }
 
-        // 2. Translate Channels #01, #02, and #03 into 2D NPC Movement
         let start_x = self.initial_values[0];
         let start_y = self.initial_values[1];
 
-        // Pendulum Mapping
         let sweep_scale = std::f32::consts::PI / NPC_DRIFT_SWEEP_RANGE; 
         let target_x = ROOM_CENTER + ROOM_USABLE_RADIUS * ((new_values[0] - start_x) * sweep_scale).sin();
         let target_y = ROOM_CENTER + ROOM_USABLE_RADIUS * ((new_values[1] - start_y) * sweep_scale).sin();
@@ -241,7 +241,6 @@ impl Simulation {
         }
     }
 
-    /// Advances the active timeline by one quantum tick.
     fn step_quantum_update(&mut self) {
         let prev_state = self.active_worldline.states.last().unwrap().clone();
         let next_tick = prev_state.tick_index + 1;
@@ -256,7 +255,6 @@ impl Simulation {
             self.last_generated_at_tick[next_tick]
         };
 
-        // Exponential Decay: Gravity fades as we move further from the branch point
         let ticks_since_jump = next_tick.saturating_sub(self.active_worldline.branch_tick) as f32;
         let half_life_ticks = (self.half_life_secs * UPDATES_PER_SEC).max(1.0);
         let gravity_w = if last_t_values.is_some() {
@@ -272,7 +270,6 @@ impl Simulation {
         self.active_worldline.states.push(next_state);
     }
 
-    /// Executes a player time-leap, archiving the current run and branching a new one.
     fn rewind_to_tick(&mut self, target_tick: usize) {
         let Some(state_idx) = self
             .active_worldline
@@ -287,6 +284,7 @@ impl Simulation {
             return;
         }
 
+        let old_id = self.active_worldline.id;
         let inherited_history = self.active_worldline.states[..=state_idx].to_vec();
         let end_state = self.active_worldline.states.last().unwrap().clone();
 
@@ -297,9 +295,7 @@ impl Simulation {
             }
         }
 
-        // --- 51-DIMENSIONAL SPACE-TIME VECTOR ANGLE ---
         let angle_deg = if self.baseline_states.is_empty() {
-            // First jump: Silently pre-simulate original fate to establish the 0.0° Baseline!
             let mut silent_states = self.active_worldline.states.clone();
             while silent_states.last().unwrap().tick_index < MIN_BASELINE_TICKS {
                 let prev = silent_states.last().unwrap();
@@ -313,10 +309,9 @@ impl Simulation {
             let ref_baseline_state = &self.baseline_states[ref_idx];
 
             let mut dot_product = 0.0;
-            let mut mag_sq_c = 0.0; // Magnitude Squared of Current Vector
-            let mut mag_sq_b = 0.0; // Magnitude Squared of Baseline Vector
+            let mut mag_sq_c = 0.0; 
+            let mut mag_sq_b = 0.0; 
 
-            // Dimensions 1-50: The 50 Quantum Channels
             for i in 0..NUM_CHANNELS {
                 let dc = end_state.values[i] - self.initial_values[i];
                 let db = ref_baseline_state.values[i] - self.initial_values[i];
@@ -326,19 +321,15 @@ impl Simulation {
                 mag_sq_b += db * db;
             }
 
-            // Dimension 51: The "Forward Time" Axis
-            // This prevents microscopic channel drifts at early ticks from reading as huge angles.
             let time_axis = TIME_AXIS_WEIGHT;
             dot_product += time_axis * time_axis;
             mag_sq_c += time_axis * time_axis;
             mag_sq_b += time_axis * time_axis;
 
-            // Cosine Similarity Formula: (A dot B) / (|A| * |B|)
             let mag_c = mag_sq_c.sqrt();
             let mag_b = mag_sq_b.sqrt();
             let cos_theta = (dot_product / (mag_c * mag_b)).clamp(-1.0, 1.0);
 
-            // Output pure positive geometric degrees (0.000000° and up)
             cos_theta.acos().to_degrees()
         };
 
@@ -351,6 +342,7 @@ impl Simulation {
             &mut self.active_worldline,
             Worldline {
                 id: next_id,
+                parent_id: Some(old_id),
                 branch_tick: target_tick,
                 states: inherited_history,
                 divergence_angle: None,
@@ -372,16 +364,13 @@ impl Simulation {
 // HELPER FUNCTIONS
 // ==========================================
 
-/// Smoothly interpolates the NPC position at 60 FPS between 10-tick quantum updates.
 fn get_interpolated_npc(
     states: &[QuantumState],
     display_tick: usize,
     sub_frame_alpha: f32,
 ) -> Option<(Vec2, Vec2)> {
     let idx = display_tick.checked_sub(1)?;
-    if idx >= states.len() {
-        return None;
-    }
+    if idx >= states.len() { return None; }
     let curr = &states[idx];
     if idx > 0 && sub_frame_alpha < 1.0 {
         let prev = &states[idx - 1];
@@ -392,7 +381,6 @@ fn get_interpolated_npc(
     }
 }
 
-/// Draws an analytical dashed line to visually represent mathematical vectors.
 fn draw_dashed_line(x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: Color, dash_len: f32, gap_len: f32) {
     let dx = x2 - x1;
     let dy = y2 - y1;
@@ -406,11 +394,9 @@ fn draw_dashed_line(x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: C
     while current_dist < dist {
         let start_x = x1 + dir_x * current_dist;
         let start_y = y1 + dir_y * current_dist;
-        
         let next_dist = (current_dist + dash_len).min(dist);
         let end_x = x1 + dir_x * next_dist;
         let end_y = y1 + dir_y * next_dist;
-        
         draw_line(start_x, start_y, end_x, end_y, thickness, color);
         current_dist = next_dist + gap_len;
     }
@@ -422,16 +408,16 @@ fn draw_dashed_line(x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: C
 
 #[macroquad::main("Quantum Decoherence Simulator")]
 async fn main() {
-    let mut sim = Simulation::new(5.0, 6.0, 3.75, ViewMode::SingleChannel(0), true);
+    let mut sim = Simulation::new(5.0, 6.0, 3.75, ViewMode::SingleChannel(0), true, false);
 
     loop {
         clear_background(Color::from_rgba(14, 16, 22, 255));
 
-        // --- INPUT HANDLING ---
         if is_key_pressed(KeyCode::Space) { sim.paused = !sim.paused; }
         if is_key_pressed(KeyCode::N) { sim.show_npc_window = !sim.show_npc_window; }
+        if is_key_pressed(KeyCode::M) { sim.git_tree_mode = !sim.git_tree_mode; }
         if is_key_pressed(KeyCode::R) {
-            sim = Simulation::new(sim.max_step, sim.half_life_secs, sim.start_gravity_weight, sim.view_mode, sim.show_npc_window);
+            sim = Simulation::new(sim.max_step, sim.half_life_secs, sim.start_gravity_weight, sim.view_mode, sim.show_npc_window, sim.git_tree_mode);
         }
         if is_key_pressed(KeyCode::C) {
             sim.view_mode = match sim.view_mode {
@@ -453,7 +439,6 @@ async fn main() {
             };
         }
 
-        // Live Parameter Tuning
         if is_key_pressed(KeyCode::S) { sim.max_step = (sim.max_step - 1.0).max(1.0); }
         if is_key_pressed(KeyCode::W) { sim.max_step = (sim.max_step + 1.0).min(50.0); }
         if is_key_pressed(KeyCode::Q) { sim.half_life_secs = (sim.half_life_secs - 1.0).max(1.0); }
@@ -469,7 +454,6 @@ async fn main() {
             }
         }
 
-        // --- DASHBOARD LAYOUT DEFINITIONS ---
         let margin_left = 70.0;
         let margin_right = 350.0; 
         let margin_top = 85.0;
@@ -490,53 +474,54 @@ async fn main() {
 
         let tick_to_x = |tick: usize| -> f32 { margin_left + ((tick as f32 - 1.0) / (max_tick as f32 - 1.0)) * plot_w };
         let val_to_y = |val: f32| -> f32 { margin_top + plot_h - ((val - y_min) / (y_max - y_min)).clamp(0.0, 1.0) * plot_h };
+        
+        let max_lanes = sim.archived_worldlines.len() + 1;
+        let lane_to_y = |id: usize| -> f32 { margin_top + (id as f32 + 0.5) * (plot_h / max_lanes as f32) };
 
-        // --- DRAW MAIN GRAPH ---
+        // Helper: Recursively find the true visual parent lane for a branch point in Git Tree mode
+        let get_visual_parent = |mut pid: usize, branch_tick: usize| -> usize {
+            while let Some(parent_wl) = sim.archived_worldlines.get(pid) {
+                if parent_wl.branch_tick <= branch_tick { break; }
+                if let Some(next_pid) = parent_wl.parent_id { pid = next_pid; } else { break; }
+            }
+            pid
+        };
+
         draw_rectangle_lines(margin_left, margin_top, plot_w, plot_h, 1.5, Color::from_rgba(50, 55, 70, 255));
 
-        // Horizontal Grid Lines
-        for i in 0..=4 {
-            let frac = i as f32 / 4.0;
-            let y = margin_top + plot_h * (1.0 - frac);
-            let val = y_min + frac * (y_max - y_min);
-            draw_line(margin_left, y, margin_left + plot_w, y, 1.0, Color::from_rgba(30, 35, 48, 255));
-            draw_text(&format!("{:.0}", val), 18.0, y + 5.0, 18.0, GRAY);
+        if !sim.git_tree_mode {
+            for i in 0..=4 {
+                let frac = i as f32 / 4.0;
+                let y = margin_top + plot_h * (1.0 - frac);
+                let val = y_min + frac * (y_max - y_min);
+                draw_line(margin_left, y, margin_left + plot_w, y, 1.0, Color::from_rgba(30, 35, 48, 255));
+                draw_text(&format!("{:.0}", val), 18.0, y + 5.0, 18.0, GRAY);
+            }
+
+            let last_jump_tick = sim.archived_worldlines.last().map(|w| w.states.last().unwrap().tick_index).unwrap_or(1);
+            if !sim.baseline_states.is_empty() && last_jump_tick > 1 {
+                let start_s = sim.baseline_states.first().unwrap();
+                let ref_idx = (last_jump_tick - 1).min(sim.baseline_states.len() - 1);
+                let end_s = &sim.baseline_states[ref_idx];
+                let sx = tick_to_x(start_s.tick_index);
+                let sy = val_to_y(sim.extract_y_value(start_s));
+                let ex = tick_to_x(end_s.tick_index);
+                let ey = val_to_y(sim.extract_y_value(end_s));
+                draw_dashed_line(sx, sy, ex, ey, 2.0, Color::from_rgba(0, 210, 255, 100), 10.0, 8.0);
+                draw_circle(ex, ey, 3.0, Color::from_rgba(0, 210, 255, 150));
+            }
+            if let Some(last_run) = sim.archived_worldlines.last() {
+                let start_s = last_run.states.first().unwrap();
+                let end_s = last_run.states.last().unwrap();
+                let sx = tick_to_x(start_s.tick_index);
+                let sy = val_to_y(sim.extract_y_value(start_s));
+                let ex = tick_to_x(end_s.tick_index);
+                let ey = val_to_y(sim.extract_y_value(end_s));
+                draw_dashed_line(sx, sy, ex, ey, 2.0, Color::from_rgba(255, 165, 40, 100), 10.0, 8.0);
+                draw_circle(ex, ey, 3.0, Color::from_rgba(255, 165, 40, 150));
+            }
         }
 
-        // --- DRAW ANALYTICAL VECTORS (Baseline & Last Jump) ---
-        let last_jump_tick = sim.archived_worldlines.last().map(|w| w.states.last().unwrap().tick_index).unwrap_or(1);
-
-        // 1. 0.000° Baseline Vector (Cyan)
-        if !sim.baseline_states.is_empty() && last_jump_tick > 1 {
-            let start_s = sim.baseline_states.first().unwrap();
-            // Terminate vector at the exact tick where the jump occurred so the visual matches the math perfectly!
-            let ref_idx = (last_jump_tick - 1).min(sim.baseline_states.len() - 1);
-            let end_s = &sim.baseline_states[ref_idx];
-            
-            let sx = tick_to_x(start_s.tick_index);
-            let sy = val_to_y(sim.extract_y_value(start_s));
-            let ex = tick_to_x(end_s.tick_index);
-            let ey = val_to_y(sim.extract_y_value(end_s));
-            
-            draw_dashed_line(sx, sy, ex, ey, 2.0, Color::from_rgba(0, 210, 255, 100), 10.0, 8.0);
-            draw_circle(ex, ey, 3.0, Color::from_rgba(0, 210, 255, 150));
-        }
-
-        // 2. Last Jump Vector (Amber)
-        if let Some(last_run) = sim.archived_worldlines.last() {
-            let start_s = last_run.states.first().unwrap();
-            let end_s = last_run.states.last().unwrap();
-            
-            let sx = tick_to_x(start_s.tick_index);
-            let sy = val_to_y(sim.extract_y_value(start_s));
-            let ex = tick_to_x(end_s.tick_index);
-            let ey = val_to_y(sim.extract_y_value(end_s));
-            
-            draw_dashed_line(sx, sy, ex, ey, 2.0, Color::from_rgba(255, 165, 40, 100), 10.0, 8.0);
-            draw_circle(ex, ey, 3.0, Color::from_rgba(255, 165, 40, 150));
-        }
-
-        // --- DRAW ARCHIVED RUNS ---
         let num_archived = sim.archived_worldlines.len();
         for (idx, wl) in sim.archived_worldlines.iter().enumerate() {
             let is_baseline = wl.id == 0;
@@ -545,62 +530,103 @@ async fn main() {
             let line_color = if is_baseline { Color::from_rgba(0, 210, 255, 190) }
             else if is_most_recent { Color::from_rgba(255, 165, 40, 210) }
             else { Color::from_rgba(110, 120, 145, 110) };
-
             let thickness = if is_baseline || is_most_recent { 2.5 } else { 1.5 };
 
-            for pair in wl.states.windows(2) {
-                if pair[0].tick_index < wl.branch_tick { continue; }
-                let x1 = tick_to_x(pair[0].tick_index);
-                let y1 = val_to_y(sim.extract_y_value(&pair[0]));
-                let x2 = tick_to_x(pair[1].tick_index);
-                let y2 = val_to_y(sim.extract_y_value(&pair[1]));
-                draw_line(x1, y1, x2, y2, thickness, line_color);
-            }
+            if sim.git_tree_mode {
+                let y = lane_to_y(wl.id);
+                let start_x = tick_to_x(wl.branch_tick);
+                let end_x = tick_to_x(wl.states.last().unwrap().tick_index);
 
-            if let Some(end_state) = wl.states.last() {
-                let end_x = tick_to_x(end_state.tick_index);
-                let end_y = val_to_y(sim.extract_y_value(end_state));
-                draw_circle(end_x, end_y, 4.0, line_color);
+                if let Some(pid) = wl.parent_id {
+                    let visual_pid = get_visual_parent(pid, wl.branch_tick);
+                    let py = lane_to_y(visual_pid);
+                    let branch_end = (start_x + 12.0).min(end_x); 
+                    draw_line(start_x, py, branch_end, y, thickness, line_color);
+                    draw_circle(start_x, py, 4.0, line_color);
+                    draw_line(branch_end, y, end_x, y, thickness, line_color);
+                } else {
+                    draw_line(start_x, y, end_x, y, thickness, line_color);
+                }
+
+                draw_circle(end_x, y, 4.0, line_color);
                 if let Some(angle) = wl.divergence_angle {
-                    draw_text(&format!("{:.6}°", angle), end_x + 8.0, end_y + 5.0, 18.0, line_color);
+                    draw_text(&format!("{:.6}°", angle), end_x + 8.0, y + 5.0, 18.0, line_color);
+                }
+            } else {
+                for pair in wl.states.windows(2) {
+                    if pair[0].tick_index < wl.branch_tick { continue; }
+                    let x1 = tick_to_x(pair[0].tick_index);
+                    let y1 = val_to_y(sim.extract_y_value(&pair[0]));
+                    let x2 = tick_to_x(pair[1].tick_index);
+                    let y2 = val_to_y(sim.extract_y_value(&pair[1]));
+                    draw_line(x1, y1, x2, y2, thickness, line_color);
+                }
+                if let Some(end_state) = wl.states.last() {
+                    let end_x = tick_to_x(end_state.tick_index);
+                    let end_y = val_to_y(sim.extract_y_value(end_state));
+                    draw_circle(end_x, end_y, 4.0, line_color);
+                    if let Some(angle) = wl.divergence_angle {
+                        draw_text(&format!("{:.6}°", angle), end_x + 8.0, end_y + 5.0, 18.0, line_color);
+                    }
                 }
             }
         }
 
-        // --- DRAW ACTIVE RUN ---
-        let active_color = Color::from_rgba(70, 255, 130, 255); // Neon Green
+        let active_color = Color::from_rgba(70, 255, 130, 255); 
         let ancestor_color = Color::from_rgba(70, 255, 130, 85);
-        let ghost_color = Color::from_rgba(255, 165, 40, 255); // Amber
+        let wl = &sim.active_worldline;
 
-        for pair in sim.active_worldline.states.windows(2) {
-            let x1 = tick_to_x(pair[0].tick_index);
-            let y1 = val_to_y(sim.extract_y_value(&pair[0]));
-            let x2 = tick_to_x(pair[1].tick_index);
-            let y2 = val_to_y(sim.extract_y_value(&pair[1]));
+        if sim.git_tree_mode {
+            let y = lane_to_y(wl.id);
+            let start_x = tick_to_x(wl.branch_tick);
+            let end_x = tick_to_x(wl.states.last().unwrap().tick_index);
 
-            if pair[0].tick_index < sim.active_worldline.branch_tick {
-                draw_line(x1, y1, x2, y2, 2.0, ancestor_color);
+            if let Some(pid) = wl.parent_id {
+                let visual_pid = get_visual_parent(pid, wl.branch_tick);
+                let py = lane_to_y(visual_pid);
+                let branch_end = (start_x + 12.0).min(end_x);
+                draw_line(start_x, py, branch_end, y, 3.0, active_color);
+                draw_circle(start_x, py, 4.0, ancestor_color);
+                draw_line(branch_end, y, end_x, y, 3.0, active_color);
             } else {
-                draw_line(x1, y1, x2, y2, 3.0, active_color);
+                draw_line(start_x, y, end_x, y, 3.0, active_color);
             }
-        }
 
-        if let Some(head) = sim.active_worldline.states.last() {
-            let hx = tick_to_x(head.tick_index);
-            let hy = val_to_y(sim.extract_y_value(head));
-            draw_circle(hx, hy, 5.5, active_color);
-
+            draw_circle(end_x, y, 5.5, active_color);
             let head_label = if sim.current_gravity_weight > 0.005 {
-                format!("T{} ({:.0}% pull)", head.tick_index, sim.current_gravity_weight * 100.0)
+                format!("T{} ({:.0}% pull)", wl.states.last().unwrap().tick_index, sim.current_gravity_weight * 100.0)
             } else {
-                format!("T{}", head.tick_index)
+                format!("T{}", wl.states.last().unwrap().tick_index)
             };
-            draw_text(&head_label, hx + 8.0, hy - 8.0, 18.0, active_color);
+            draw_text(&head_label, end_x + 8.0, y - 8.0, 18.0, active_color);
+        } else {
+            for pair in wl.states.windows(2) {
+                let x1 = tick_to_x(pair[0].tick_index);
+                let y1 = val_to_y(sim.extract_y_value(&pair[0]));
+                let x2 = tick_to_x(pair[1].tick_index);
+                let y2 = val_to_y(sim.extract_y_value(&pair[1]));
+
+                if pair[0].tick_index < wl.branch_tick {
+                    draw_line(x1, y1, x2, y2, 2.0, ancestor_color);
+                } else {
+                    draw_line(x1, y1, x2, y2, 3.0, active_color);
+                }
+            }
+            if let Some(head) = wl.states.last() {
+                let hx = tick_to_x(head.tick_index);
+                let hy = val_to_y(sim.extract_y_value(head));
+                draw_circle(hx, hy, 5.5, active_color);
+                let head_label = if sim.current_gravity_weight > 0.005 {
+                    format!("T{} ({:.0}% pull)", head.tick_index, sim.current_gravity_weight * 100.0)
+                } else {
+                    format!("T{}", head.tick_index)
+                };
+                draw_text(&head_label, hx + 8.0, hy - 8.0, 18.0, active_color);
+            }
         }
 
         let mut hovered_rewind_tick: Option<usize> = None;
 
-        // Interactive Rewind Cursor
         if sim.paused {
             let (mx, my) = mouse_position();
             if mx >= margin_left && mx <= margin_left + plot_w && my >= margin_top && my <= margin_top + plot_h {
@@ -611,8 +637,17 @@ async fn main() {
                 }) {
                     let target_tick = closest_state.tick_index;
                     hovered_rewind_tick = Some(target_tick);
+                    
                     let cx = tick_to_x(target_tick);
-                    let cy = val_to_y(sim.extract_y_value(closest_state));
+                    let cy = if sim.git_tree_mode {
+                        if target_tick < sim.active_worldline.branch_tick && sim.active_worldline.parent_id.is_some() {
+                            lane_to_y(get_visual_parent(sim.active_worldline.parent_id.unwrap(), target_tick))
+                        } else {
+                            lane_to_y(sim.active_worldline.id)
+                        }
+                    } else {
+                        val_to_y(sim.extract_y_value(closest_state))
+                    };
 
                     draw_line(cx, margin_top, cx, margin_top + plot_h, 1.5, Color::from_rgba(255, 80, 80, 180));
                     draw_circle(cx, cy, 7.0, RED);
@@ -627,7 +662,6 @@ async fn main() {
 
         let display_tick = hovered_rewind_tick.unwrap_or_else(|| sim.active_worldline.states.last().unwrap().tick_index);
 
-        // --- NPC ARENA WINDOW OVERLAY ---
         if sim.show_npc_window {
             let win_w = 420.0;
             let win_h = 420.0;
@@ -684,17 +718,18 @@ async fn main() {
                 draw_agent(&sim.baseline_states, Color::from_rgba(0, 210, 255, 140), Color::from_rgba(0, 210, 255, 65), 5.5, false);
             }
             if let Some(prev1) = sim.archived_worldlines.last() {
+                let ghost_color = Color::from_rgba(255, 165, 40, 255);
                 draw_agent(&prev1.states, ghost_color, Color::from_rgba(255, 165, 40, 110), 6.5, true);
             }
             draw_agent(&sim.active_worldline.states, active_color, Color::from_rgba(70, 255, 130, 150), 8.0, true);
         }
 
-        // --- 50-CHANNEL DATA GRID ---
         draw_text(&format!("QUANTUM CHANNELS @ T{} (Active | Ghost N-1)", display_tick), margin_left, margin_top + plot_h + 18.0, 16.0, GRAY);
         
         let grid_y = margin_top + plot_h + 35.0;
         let col_w = plot_w / 10.0;
         let row_h = 22.0;
+        let ghost_color = Color::from_rgba(255, 165, 40, 255);
 
         let display_idx = display_tick.saturating_sub(1);
         let active_state_opt = sim.active_worldline.states.get(display_idx);
@@ -706,7 +741,7 @@ async fn main() {
             let cx = margin_left + col as f32 * col_w;
             let cy = grid_y + row as f32 * row_h;
 
-            let is_npc = i < 3; // Channels 0, 1, 2 are used for NPC movement
+            let is_npc = i < 3; 
             let mut x = cx;
 
             if is_npc { draw_text("[", x, cy, 16.0, LIGHTGRAY); }
@@ -726,28 +761,26 @@ async fn main() {
             if is_npc { draw_text("]", x, cy, 16.0, LIGHTGRAY); }
         }
 
-        // --- UI STATUS & LEGEND ---
-        let status_str = if sim.paused { "PAUSED (Click ANYWHERE along T1..Tip to Rewind, SPACE to Resume, N: NPC Arena)" }
-        else { "RUNNING (SPACE: Pause & Rewind | N: Toggle NPC Arena)" };
+        let status_str = if sim.paused { "PAUSED (Click graph to Rewind | SPACE: Resume | M: View | N: NPC)" }
+        else { "RUNNING (SPACE: Pause & Rewind | M: View Mode | N: NPC Arena)" };
         let status_col = if sim.paused { YELLOW } else { GREEN };
         draw_text(status_str, margin_left, 30.0, 22.0, status_col);
 
         let half_life_ticks = (sim.half_life_secs * UPDATES_PER_SEC) as usize;
         let view_str = match sim.view_mode {
             ViewMode::SingleChannel(s) => format!(
-                "Ch #{:02}/50 [{:.0}..{:.0}] | Step(W/S): ±{:.0} | Half-Life(Q/E): {:.0}s ({}t) | Start Pull(Z/X): {:.0}% | Ch(A/D) | Comp(C)",
+                "Ch #{:02}/50 [{:.0}..{:.0}] | Step(W/S): ±{:.0} | Half-Life(Q/E): {:.0}s ({}t) | Pull(Z/X): {:.0}%",
                 s + 1, sim.bounds[s].min, sim.bounds[s].max, sim.max_step, sim.half_life_secs, half_life_ticks, sim.start_gravity_weight * 100.0
             ),
             ViewMode::CompositeAverage => format!(
-                "Composite (50 Ch) | Step(W/S): ±{:.0} | Half-Life(Q/E): {:.0}s ({}t) | Start Pull(Z/X): {:.0}% | Ch(C/A/D)",
+                "Composite (50 Ch) | Step(W/S): ±{:.0} | Half-Life(Q/E): {:.0}s ({}t) | Pull(Z/X): {:.0}%",
                 sim.max_step, sim.half_life_secs, half_life_ticks, sim.start_gravity_weight * 100.0
             ),
         };
         draw_text(&view_str, margin_left, 56.0, 17.0, LIGHTGRAY);
 
-        draw_text("Cyan: 0.0° Baseline | Amber: Run N-1 | Green: Active | N: NPC Window | R: Reset", margin_left, screen_height() - 15.0, 17.5, GRAY);
+        draw_text("Cyan: 0.0° Fate | Amber: Run N-1 | Green: Active | C/A/D: Ch | M: Git View | N: NPC | R: Reset", margin_left, screen_height() - 15.0, 17.5, GRAY);
 
-        // --- NIXIE DIVERGENCE METER ---
         let meter_w = 320.0;
         let meter_h = 65.0;
         let meter_x = screen_width() - meter_w - 25.0;
@@ -758,7 +791,7 @@ async fn main() {
         draw_text("LAST JUMP DIVERGENCE", meter_x + 14.0, meter_y + 22.0, 16.0, Color::from_rgba(200, 130, 80, 255));
 
         let meter_val = match sim.last_divergence_readout {
-            Some(deg) => format!("{:.6}°", deg), // Pure geometric angle, no artificial signs needed!
+            Some(deg) => format!("{:.6}°", deg),
             None => "?.??????° (NO JUMP)".to_string(),
         };
         draw_text(&meter_val, meter_x + 14.0, meter_y + 52.0, 30.0, Color::from_rgba(255, 145, 35, 255));
