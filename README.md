@@ -44,3 +44,19 @@ cargo run --release
    * **Q / E** - Tune Half-Life (How long the previous timeline's gravity holds onto the new timeline before decohering).
 
    * **Z / X** - Tune Start Pull (The initial strength of the gravity tether right after a time jump).
+
+
+## Example
+
+**Early Ticks**
+
+  Here you can see taht early on in the run, the NPC will follow the same general walking pattern with only slight deviance from each each Time Line.
+  
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/1768381d-bb98-4254-bc00-afe35401bebc" />
+
+**Late Ticks**
+
+  However, the further along time goes, the timelines drift further apart and the NPC starts taking different paths.
+  
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/c22c2014-ab39-4af2-a5cc-f0cc77fc6d26" />
+
