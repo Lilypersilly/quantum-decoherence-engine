@@ -50,7 +50,7 @@ cargo run --release
 
 **Early Ticks**
 
-  Here you can see that early on in the run, the NPC will follow the same general walking pattern with only slight deviance from each each Time Line.
+  Here you can see that early on in the run, the NPC will follow the same general walking pattern with only slight deviance from each Time Line.
   
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/1768381d-bb98-4254-bc00-afe35401bebc" />
 
