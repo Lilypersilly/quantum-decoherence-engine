@@ -58,5 +58,6 @@ cargo run --release
 
   However, the further along time goes, the timelines drift further apart and the NPC starts taking different paths.
   
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/c22c2014-ab39-4af2-a5cc-f0cc77fc6d26" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/682ce121-dd90-4658-8e05-78690eb78e86" />
+
 
