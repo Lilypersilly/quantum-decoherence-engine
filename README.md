@@ -16,7 +16,7 @@ Instead of writing bespoke, hard-coded squad AI or using pure RNG, this engine g
 Make sure you have [Rust installed](https://rustup.rs/), then clone the repo and run:
 
 ```bash
-cargo run --release
+cargo run --release```
 
 ## Controls
 **Time Travel & UI**
