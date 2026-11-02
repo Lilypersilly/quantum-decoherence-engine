@@ -23,24 +23,24 @@ cargo run --release
 ## Controls
 **Time Travel & UI**
 
-    **SPACE** - Pause / Resume the quantum engine.
+   * **SPACE** - Pause / Resume the quantum engine.
 
-    **Left Click** (While Paused) - Click anywhere on the active timeline graph to time-leap and spawn a new branch.
+   * **Left Click** (While Paused) - Click anywhere on the active timeline graph to time-leap and spawn a new branch.
 
-    **N** - Toggle the 2D NPC Arena Overlay (Watch the Active NPC and Timeline Ghosts move in real-time).
+   * **N** - Toggle the 2D NPC Arena Overlay (Watch the Active NPC and Timeline Ghosts move in real-time).
 
-    **R** - Reset the entire simulation (generates a new True Fate Baseline).
+   * **R** - Reset the entire simulation (generates a new True Fate Baseline).
 
 **View Modes (Graph & Data Grid)**
 
-    **C** - Toggle between the Composite View (Average of all 50 channels) and Single Channel View.
+   * **C** - Toggle between the Composite View (Average of all 50 channels) and Single Channel View.
 
-    **UP / DOWN (or W/S / Arrows)** - Cycle through the 50 individual Quantum Channels.
+   * **UP / DOWN (or W/S / Arrows)** - Cycle through the 50 individual Quantum Channels.
 
 **Live Engine Tuning**
 
-    **W / S** - Tune Step Size (How fast channels drift per tick).
+   * **W / S** - Tune Step Size (How fast channels drift per tick).
 
-    **Q / E** - Tune Half-Life (How long the previous timeline's gravity holds onto the new timeline before decohering).
+   * **Q / E** - Tune Half-Life (How long the previous timeline's gravity holds onto the new timeline before decohering).
 
-    **Z / X** - Tune Start Pull (The initial strength of the gravity tether right after a time jump).
+   * **Z / X** - Tune Start Pull (The initial strength of the gravity tether right after a time jump).
