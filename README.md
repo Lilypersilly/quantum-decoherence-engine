@@ -10,6 +10,7 @@ Instead of writing bespoke, hard-coded squad AI or using pure RNG, this engine g
 * **Deterministic AI Pendulum Mapping:** Channels map to 2D room coordinates using Sine-wave math. This translates abstract 1D quantum drift into smooth, wall-to-wall 2D patrol routes for NPCs.
 * **51-Dimensional Divergence Meter:** Calculates the true geometric angle between the original "Fate" baseline and your current timeline using a 51-dimensional Cosine Similarity formula (50 spatial channels + 1 Time axis).
 * **Live Interactive UI:** Features a real-time graphed timeline, a live NPC arena overlay, and a synchronized 50-channel data grid.
+* **Alt Version:** There is an alternative version in the Alt folder, which per-generates timelines every time time is rewound, this is to simulate B theory of time instead.
 
 ## How to Run
 
