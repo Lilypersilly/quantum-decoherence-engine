@@ -8,18 +8,12 @@ use macroquad::prelude::*;
 // SIMULATION & PHYSICS CONSTANTS
 // ==========================================
 
-/// Total number of independent quantum channels available for NPCs to read.
 const NUM_CHANNELS: usize = 50;
-
-/// The clock rate of the quantum engine (6 updates per second at 60 FPS).
 const TICKS_PER_UPDATE: u32 = 10;
 const UPDATES_PER_SEC: f32 = 6.0;
-
-/// The number of ticks we silently pre-simulate to establish the 0.0° Fate Baseline.
 const MIN_BASELINE_TICKS: usize = 1000;
 
 // --- NPC MAPPING MATH ---
-/// How many points of drift across a channel cause the NPC to sweep from the center to a wall.
 const NPC_DRIFT_SWEEP_RANGE: f32 = 35.0;
 const ROOM_CENTER: f32 = 0.5;
 const ROOM_USABLE_RADIUS: f32 = 0.46;
@@ -36,32 +30,45 @@ struct Bounds {
     max: f32,
 }
 
-/// A snapshot of the universe at a specific tick.
 #[derive(Clone)]
 struct QuantumState {
     tick_index: usize,
     values: [f32; NUM_CHANNELS],
-    // Cached purely for instant rendering!
-    composite_avg: f32,
     momentums: [f32; NUM_CHANNELS],
-    // NPC visual coordinates (0.0..=1.0 normalized mapping)
+    // Cached variables for instant rendering
+    composite_avg: f32,
+    composite_x: f32, // Average of channels 0..25 (Used for 3D Phase Space)
+    composite_y: f32, // Average of channels 25..50 (Used for 3D Phase Space)
     npc_pos: Vec2,
     npc_target: Vec2,
+}
+
+impl QuantumState {
+    fn average_value(&self) -> f32 {
+        self.values.iter().sum::<f32>() / NUM_CHANNELS as f32
+    }
 }
 
 struct Worldline {
     id: usize,
     parent_id: Option<usize>, 
     branch_tick: usize,       
-    abandoned_tick: Option<usize>, // The exact tick the player rewound away from this run!
-    states: Vec<QuantumState>,     // Fully pre-calculated out to max_ticks
+    abandoned_tick: Option<usize>,
+    states: Vec<QuantumState>,     
     divergence_angle: f32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum ViewMode {
     SingleChannel(usize),
     CompositeAverage,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum GraphMode {
+    Physical,
+    GitTree,
+    PhaseSpace3D,
 }
 
 // ==========================================
@@ -71,29 +78,24 @@ enum ViewMode {
 struct Simulation {
     bounds: [Bounds; NUM_CHANNELS],
     initial_values: [f32; NUM_CHANNELS],
-    
-    // Ghost memory of the previous run (Full array up to max_ticks)
     last_generated_timeline: Vec<QuantumState>,
-
-    // The True 0.0° Fate Baseline
     baseline_states: Vec<QuantumState>,
-
     archived_worldlines: Vec<Worldline>,
     active_worldline: Worldline,
-
-    // The "Playhead" (where the player currently is in time)
     current_tick: usize,
-    
-    // Maximum generation length of the timeline
     max_ticks: usize,
-
+    
     // UI & State Toggles
     paused: bool,
     show_npc_window: bool,
-    git_tree_mode: bool, 
+    graph_mode: GraphMode, 
     frame_counter: u32,
     view_mode: ViewMode,
     
+    // 3D Camera Controls
+    cam_pitch: f32,
+    cam_yaw: f32,
+
     // Live-tunable Engine Parameters
     max_step: f32,             
     half_life_secs: f32,       
@@ -109,18 +111,22 @@ impl Simulation {
         max_ticks: usize,
         view_mode: ViewMode,
         show_npc_window: bool,
-        git_tree_mode: bool,
+        graph_mode: GraphMode,
     ) -> Self {
         rand::srand(miniquad::date::now() as u64);
 
         let mut initial_values = [0.0; NUM_CHANNELS];
         let mut bounds = [Bounds { min: 0.0, max: 0.0 }; NUM_CHANNELS];
         let mut init_sum = 0.0;
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
 
         for i in 0..NUM_CHANNELS {
             let start_val = rand::gen_range(0, 100) as f32;
             initial_values[i] = start_val;
             init_sum += start_val;
+            if i < 25 { sum_x += start_val; } else { sum_y += start_val; }
+            
             bounds[i] = Bounds {
                 min: start_val - 100.0,
                 max: start_val + 100.0,
@@ -130,13 +136,14 @@ impl Simulation {
         let t1_state = QuantumState {
             tick_index: 1,
             values: initial_values,
-            composite_avg: init_sum / NUM_CHANNELS as f32,
             momentums: [0.0; NUM_CHANNELS],
+            composite_avg: init_sum / NUM_CHANNELS as f32,
+            composite_x: sum_x / 25.0,
+            composite_y: sum_y / 25.0,
             npc_pos: vec2(ROOM_CENTER, ROOM_CENTER),
             npc_target: vec2(ROOM_CENTER, ROOM_CENTER),
         };
 
-        // Pre-generate Run 1 (Baseline) entirely out to max_ticks instantly!
         let mut baseline_states = vec![t1_state];
         for _ in 2..=max_ticks {
             let prev = baseline_states.last().unwrap();
@@ -164,9 +171,11 @@ impl Simulation {
             max_ticks,
             paused: false,
             show_npc_window,
-            git_tree_mode,
+            graph_mode,
             frame_counter: 0,
             view_mode,
+            cam_pitch: 0.4,
+            cam_yaw: -0.6, 
             max_step,
             half_life_secs,
             start_gravity_weight,
@@ -174,7 +183,6 @@ impl Simulation {
         }
     }
 
-    /// Pure function to compute a single state frame.
     fn compute_next_state(
         bounds: &[Bounds; NUM_CHANNELS],
         max_step: f32,
@@ -186,6 +194,8 @@ impl Simulation {
         let mut new_values = [0.0; NUM_CHANNELS];
         let mut new_momentums = [0.0; NUM_CHANNELS];
         let mut composite_sum = 0.0;
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
 
         for i in 0..NUM_CHANNELS {
             let current = prev_state.values[i];
@@ -195,8 +205,7 @@ impl Simulation {
             let step_roll = rand::gen_range(-max_step, max_step);
             let roll = (current + step_roll).clamp(b.min, b.max);
 
-            let goes_against =
-                (momentum > 0.0 && roll < current) || (momentum < 0.0 && roll > current);
+            let goes_against = (momentum > 0.0 && roll < current) || (momentum < 0.0 && roll > current);
 
             let modified_roll = if goes_against {
                 (roll + momentum).clamp(b.min, b.max)
@@ -212,13 +221,11 @@ impl Simulation {
 
             let next_val = next_val.clamp(b.min, b.max);
             new_values[i] = next_val;
-            composite_sum += next_val;
             new_momentums[i] = next_val - current;
+            
+            composite_sum += next_val;
+            if i < 25 { sum_x += next_val; } else { sum_y += next_val; }
         }
-
-        // Pendulum Sine-Wave NPC Mapping
-        let start_x = prev_state.values[0] - prev_state.momentums[0]; 
-        let start_y = prev_state.values[1] - prev_state.momentums[1]; 
         
         let sweep_scale = std::f32::consts::PI / NPC_DRIFT_SWEEP_RANGE; 
         let base_x = bounds[0].min + 100.0;
@@ -244,31 +251,28 @@ impl Simulation {
         QuantumState {
             tick_index: next_tick,
             values: new_values,
-            composite_avg: composite_sum / NUM_CHANNELS as f32,
             momentums: new_momentums,
+            composite_avg: composite_sum / NUM_CHANNELS as f32,
+            composite_x: sum_x / 25.0,
+            composite_y: sum_y / 25.0,
             npc_pos,
             npc_target,
         }
     }
 
-    /// Advances the playhead. (Physics is already pre-generated!)
     fn step_playhead(&mut self) {
         if self.current_tick < self.max_ticks {
             self.current_tick += 1;
         }
     }
 
-    /// Executes a player time-leap. Generates the entire new timeline matrix instantly!
     fn rewind_to_tick(&mut self, target_tick: usize) {
         if target_tick >= self.current_tick { return; }
 
         let old_id = self.active_worldline.id;
-        
-        // Archive the current worldline, marking exactly where it was abandoned
         self.active_worldline.abandoned_tick = Some(self.current_tick);
         let mut new_states = self.active_worldline.states[..target_tick].to_vec();
         
-        // The abandoned run becomes the permanent Ghost gravity track
         self.last_generated_timeline = self.active_worldline.states.clone();
 
         let finished_line = std::mem::replace(
@@ -279,12 +283,11 @@ impl Simulation {
                 branch_tick: target_tick,
                 abandoned_tick: None,
                 states: Vec::new(),
-                divergence_angle: 0.0, 
+                divergence_angle: 0.0,
             },
         );
         self.archived_worldlines.push(finished_line);
 
-        // Instantly pre-generate the entire new timeline out to max_ticks
         let half_life_ticks = (self.half_life_secs * UPDATES_PER_SEC).max(1.0);
         
         for t in target_tick..self.max_ticks {
@@ -303,7 +306,6 @@ impl Simulation {
         self.current_tick = target_tick;
     }
 
-    /// Recalculates the pure geometric divergence of the active timeline against the fate baseline
     fn recalc_active_divergence(&mut self) {
         let mut dot_product = 0.0;
         let mut mag_sq_c = 0.0; 
@@ -316,12 +318,10 @@ impl Simulation {
 
         let initial = &self.initial_values;
 
-        // Compare the 50,000 data point matrix directly!
         for t in 0..self.max_ticks {
             let active_s = &self.active_worldline.states[t];
             let base_s = &self.baseline_states[t];
             for c in 0..NUM_CHANNELS {
-                // Vector measured from the Starting Initial Value
                 let dc = active_s.values[c] - initial[c];
                 let db = base_s.values[c] - initial[c];
                 
@@ -331,7 +331,6 @@ impl Simulation {
             }
         }
 
-        // PURE MATH: No time axis weight. No artificial sign. Just the raw high-dimensional angle.
         let mag_c = mag_sq_c.sqrt().max(0.00001); 
         let mag_b = mag_sq_b.sqrt().max(0.00001);
         let cos_theta = (dot_product / (mag_c * mag_b)).clamp(-1.0, 1.0);
@@ -339,7 +338,6 @@ impl Simulation {
         self.active_worldline.divergence_angle = cos_theta.acos().to_degrees();
     }
 
-    /// Shrinks or expands the max time of the simulation dynamically!
     fn adjust_max_ticks(&mut self, delta_ticks: i32) {
         let new_max = (self.max_ticks as i32 + delta_ticks).max(60) as usize; 
         if new_max == self.max_ticks { return; }
@@ -352,16 +350,12 @@ impl Simulation {
             self.last_generated_timeline.truncate(new_max);
             self.active_worldline.states.truncate(new_max);
             
-            if self.current_tick > new_max {
-                self.current_tick = new_max;
-            }
+            if self.current_tick > new_max { self.current_tick = new_max; }
             
             for wl in &mut self.archived_worldlines {
                 wl.states.truncate(new_max);
                 if let Some(abandoned) = wl.abandoned_tick {
-                    if abandoned > new_max {
-                        wl.abandoned_tick = Some(new_max);
-                    }
+                    if abandoned > new_max { wl.abandoned_tick = Some(new_max); }
                 }
             }
             self.recalc_active_divergence();
@@ -403,10 +397,9 @@ impl Simulation {
         }
     }
 
-    /// Pulls the exact cached Y-value needed instantly for drawing
     fn extract_y_value(&self, state: &QuantumState) -> f32 {
         match self.view_mode {
-            ViewMode::CompositeAverage => state.composite_avg, // Zero math!
+            ViewMode::CompositeAverage => state.composite_avg,
             ViewMode::SingleChannel(ch) => state.values[ch],
         }
     }
@@ -439,7 +432,8 @@ fn get_interpolated_npc(
 
 #[macroquad::main("Quantum Decoherence Simulator")]
 async fn main() {
-    let mut sim = Simulation::new(5.0, 6.0, 3.75, 1080, ViewMode::SingleChannel(0), true, false);
+    let mut sim = Simulation::new(5.0, 6.0, 3.75, 1080, ViewMode::SingleChannel(0), true, GraphMode::Physical);
+    let mut last_mouse_pos = vec2(0.0, 0.0);
 
     loop {
         clear_background(Color::from_rgba(14, 16, 22, 255));
@@ -447,9 +441,15 @@ async fn main() {
         // --- INPUT HANDLING ---
         if is_key_pressed(KeyCode::Space) { sim.paused = !sim.paused; }
         if is_key_pressed(KeyCode::N) { sim.show_npc_window = !sim.show_npc_window; }
-        if is_key_pressed(KeyCode::M) { sim.git_tree_mode = !sim.git_tree_mode; }
+        if is_key_pressed(KeyCode::M) { 
+            sim.graph_mode = match sim.graph_mode {
+                GraphMode::Physical => GraphMode::GitTree,
+                GraphMode::GitTree => GraphMode::PhaseSpace3D,
+                GraphMode::PhaseSpace3D => GraphMode::Physical,
+            }; 
+        }
         if is_key_pressed(KeyCode::R) {
-            sim = Simulation::new(sim.max_step, sim.half_life_secs, sim.start_gravity_weight, sim.max_ticks, sim.view_mode, sim.show_npc_window, sim.git_tree_mode);
+            sim = Simulation::new(sim.max_step, sim.half_life_secs, sim.start_gravity_weight, sim.max_ticks, sim.view_mode, sim.show_npc_window, sim.graph_mode);
         }
         if is_key_pressed(KeyCode::C) {
             sim.view_mode = match sim.view_mode {
@@ -471,17 +471,28 @@ async fn main() {
             };
         }
 
-        // Live Parameter Tuning
         if is_key_pressed(KeyCode::S) { sim.max_step = (sim.max_step - 1.0).max(1.0); }
         if is_key_pressed(KeyCode::W) { sim.max_step = (sim.max_step + 1.0).min(50.0); }
         if is_key_pressed(KeyCode::Q) { sim.half_life_secs = (sim.half_life_secs - 1.0).max(1.0); }
         if is_key_pressed(KeyCode::E) { sim.half_life_secs = (sim.half_life_secs + 1.0).min(60.0); }
         if is_key_pressed(KeyCode::Z) { sim.start_gravity_weight = (sim.start_gravity_weight - 0.25).max(0.25); }
         if is_key_pressed(KeyCode::X) { sim.start_gravity_weight = (sim.start_gravity_weight + 0.25).min(10.0); }
-        
-        // Dynamic Level Time Tuning (+/- 10 seconds per press)
         if is_key_pressed(KeyCode::F) { sim.adjust_max_ticks(-60); }
         if is_key_pressed(KeyCode::G) { sim.adjust_max_ticks(60); }
+
+        // 3D Camera Controls
+        let (mx, my) = mouse_position();
+        if is_mouse_button_pressed(MouseButton::Right) {
+            last_mouse_pos = vec2(mx, my);
+        }
+        if is_mouse_button_down(MouseButton::Right) {
+            let dx = mx - last_mouse_pos.x;
+            let dy = my - last_mouse_pos.y;
+            sim.cam_yaw += dx * 0.01;
+            sim.cam_pitch += dy * 0.01;
+            sim.cam_pitch = sim.cam_pitch.clamp(-std::f32::consts::PI / 2.0, std::f32::consts::PI / 2.0);
+            last_mouse_pos = vec2(mx, my);
+        }
 
         if !sim.paused {
             sim.frame_counter += 1;
@@ -491,7 +502,6 @@ async fn main() {
             }
         }
 
-        // --- DASHBOARD LAYOUT DEFINITIONS ---
         let margin_left = 70.0;
         let margin_right = 350.0; 
         let margin_top = 85.0;
@@ -505,11 +515,8 @@ async fn main() {
             ViewMode::SingleChannel(s) => (sim.bounds[s].min, sim.bounds[s].max),
         };
 
-        // Graph Coordinate Mapping Closures
         let tick_to_x = |tick: usize| -> f32 { margin_left + ((tick as f32 - 1.0) / (sim.max_ticks as f32 - 1.0)) * plot_w };
         let val_to_y = |val: f32| -> f32 { margin_top + plot_h - ((val - y_min) / (y_max - y_min)).clamp(0.0, 1.0) * plot_h };
-        
-        // Git Tree Lane Mapping Closure
         let max_lanes = sim.archived_worldlines.len() + 1;
         let lane_to_y = |id: usize| -> f32 { margin_top + (id as f32 + 0.5) * (plot_h / max_lanes as f32) };
 
@@ -521,10 +528,41 @@ async fn main() {
             pid
         };
 
-        // --- DRAW MAIN GRAPH ---
+        let project_3d = |t: usize, val_x: f32, val_y: f32| -> Vec2 {
+            let dx = val_x - 50.0;
+            let dy = val_y - 50.0; 
+            let dz = (t as f32 / sim.max_ticks as f32) * 100.0 - 50.0; 
+
+            let x1 = dx * sim.cam_yaw.cos() - dz * sim.cam_yaw.sin();
+            let z1 = dx * sim.cam_yaw.sin() + dz * sim.cam_yaw.cos();
+            let y1 = dy * sim.cam_pitch.cos() - z1 * sim.cam_pitch.sin();
+
+            let cx = margin_left + plot_w / 2.0;
+            let cy = margin_top + plot_h / 2.0;
+            
+            let scale_x = plot_w / 140.0;
+            let scale_y = plot_h / 140.0;
+
+            vec2(cx + x1 * scale_x, cy - y1 * scale_y) 
+        };
+
         draw_rectangle_lines(margin_left, margin_top, plot_w, plot_h, 1.5, Color::from_rgba(50, 55, 70, 255));
 
-        if !sim.git_tree_mode {
+        if sim.graph_mode == GraphMode::PhaseSpace3D {
+            let origin = project_3d(0, 50.0, 50.0);
+            let end_x = project_3d(0, 100.0, 50.0); 
+            let end_y = project_3d(0, 50.0, 100.0); 
+            let end_z = project_3d(sim.max_ticks, 50.0, 50.0); 
+
+            draw_line(origin.x, origin.y, end_x.x, end_x.y, 2.0, Color::from_rgba(255, 100, 100, 150));
+            draw_text("X: Ch 1-25", end_x.x + 5.0, end_x.y, 16.0, Color::from_rgba(255, 100, 100, 150));
+            
+            draw_line(origin.x, origin.y, end_y.x, end_y.y, 2.0, Color::from_rgba(100, 255, 100, 150));
+            draw_text("Y: Ch 26-50", end_y.x + 5.0, end_y.y, 16.0, Color::from_rgba(100, 255, 100, 150));
+            
+            draw_line(origin.x, origin.y, end_z.x, end_z.y, 2.0, Color::from_rgba(100, 150, 255, 150));
+            draw_text("Z: Time", end_z.x + 5.0, end_z.y, 16.0, Color::from_rgba(100, 150, 255, 150));
+        } else if sim.graph_mode == GraphMode::Physical {
             for i in 0..=4 {
                 let frac = i as f32 / 4.0;
                 let y = margin_top + plot_h * (1.0 - frac);
@@ -532,14 +570,12 @@ async fn main() {
                 draw_line(margin_left, y, margin_left + plot_w, y, 1.0, Color::from_rgba(30, 35, 48, 255));
                 draw_text(&format!("{:.0}", val), 18.0, y + 5.0, 18.0, GRAY);
             }
+            
+            let ph_x = tick_to_x(sim.current_tick);
+            draw_line(ph_x, margin_top, ph_x, margin_top + plot_h, 1.5, Color::from_rgba(255, 255, 255, 60));
+            draw_text(&format!("LIVE: T{}", sim.current_tick), ph_x + 5.0, margin_top + 15.0, 16.0, LIGHTGRAY);
         }
 
-        // --- DRAW PLAYHEAD (Current Time) ---
-        let ph_x = tick_to_x(sim.current_tick);
-        draw_line(ph_x, margin_top, ph_x, margin_top + plot_h, 1.5, Color::from_rgba(255, 255, 255, 60));
-        draw_text(&format!("LIVE: T{}", sim.current_tick), ph_x + 5.0, margin_top + 15.0, 16.0, LIGHTGRAY);
-
-        // --- DRAW ARCHIVED RUNS (Heavily Optimized Render Loop!) ---
         let num_archived = sim.archived_worldlines.len();
         for (idx, wl) in sim.archived_worldlines.iter().enumerate() {
             let is_baseline = wl.id == 0;
@@ -550,7 +586,7 @@ async fn main() {
             else { Color::from_rgba(110, 120, 145, 110) };
             let thickness = if is_baseline || is_most_recent { 2.5 } else { 1.5 };
 
-            if sim.git_tree_mode {
+            if sim.graph_mode == GraphMode::GitTree {
                 let y = lane_to_y(wl.id);
                 let start_x = tick_to_x(wl.branch_tick);
                 let end_tick = wl.abandoned_tick.unwrap_or(sim.max_ticks);
@@ -568,7 +604,7 @@ async fn main() {
                 }
                 draw_circle(end_x, y, 4.0, line_color);
                 draw_text(&format!("{:.6}°", wl.divergence_angle), end_x + 8.0, y + 5.0, 18.0, line_color);
-            } else {
+            } else if sim.graph_mode == GraphMode::Physical {
                 let mut prev_pt: Option<(f32, f32)> = None;
                 for state in &wl.states {
                     if state.tick_index < wl.branch_tick { continue; }
@@ -585,15 +621,24 @@ async fn main() {
                 let end_y = val_to_y(sim.extract_y_value(wl.states.last().unwrap()));
                 draw_circle(end_x, end_y, 4.0, line_color);
                 draw_text(&format!("{:.6}°", wl.divergence_angle), end_x + 8.0, end_y + 5.0, 18.0, line_color);
+            } else if sim.graph_mode == GraphMode::PhaseSpace3D {
+                let mut prev_pt: Option<Vec2> = None;
+                for state in &wl.states {
+                    if state.tick_index < wl.branch_tick { continue; }
+                    let pt = project_3d(state.tick_index, state.composite_x, state.composite_y);
+                    if let Some(p) = prev_pt {
+                        draw_line(p.x, p.y, pt.x, pt.y, thickness, line_color);
+                    }
+                    prev_pt = Some(pt);
+                }
             }
         }
 
-        // --- DRAW ACTIVE RUN ---
         let active_color = Color::from_rgba(70, 255, 130, 255); 
         let ancestor_color = Color::from_rgba(70, 255, 130, 85);
         let wl = &sim.active_worldline;
 
-        if sim.git_tree_mode {
+        if sim.graph_mode == GraphMode::GitTree {
             let y = lane_to_y(wl.id);
             let start_x = tick_to_x(wl.branch_tick);
             let end_x = tick_to_x(sim.current_tick); 
@@ -608,9 +653,8 @@ async fn main() {
             } else {
                 draw_line(start_x, y, end_x, y, 3.0, active_color);
             }
-
             draw_circle(end_x, y, 5.5, active_color);
-        } else {
+        } else if sim.graph_mode == GraphMode::Physical {
             let mut prev_pt: Option<(f32, f32)> = None;
             for state in &wl.states {
                 let curr_x = tick_to_x(state.tick_index);
@@ -627,16 +671,32 @@ async fn main() {
                 }
                 prev_pt = Some((curr_x, curr_y));
             }
-            
             let cx = tick_to_x(sim.current_tick);
             let cy = val_to_y(sim.extract_y_value(&wl.states[sim.current_tick - 1]));
             draw_circle(cx, cy, 5.5, active_color);
+        } else if sim.graph_mode == GraphMode::PhaseSpace3D {
+            let mut prev_pt: Option<Vec2> = None;
+            for state in &wl.states {
+                let pt = project_3d(state.tick_index, state.composite_x, state.composite_y);
+                if let Some(p) = prev_pt {
+                    if state.tick_index <= wl.branch_tick {
+                        draw_line(p.x, p.y, pt.x, pt.y, 2.0, ancestor_color);
+                    } else if state.tick_index > sim.current_tick {
+                        draw_line(p.x, p.y, pt.x, pt.y, 1.5, Color::from_rgba(70, 255, 130, 100)); 
+                    } else {
+                        draw_line(p.x, p.y, pt.x, pt.y, 3.0, active_color);
+                    }
+                }
+                prev_pt = Some(pt);
+            }
+            let head_s = &wl.states[sim.current_tick - 1];
+            let pt = project_3d(head_s.tick_index, head_s.composite_x, head_s.composite_y);
+            draw_circle(pt.x, pt.y, 5.5, active_color);
         }
 
         let mut hovered_rewind_tick: Option<usize> = None;
 
-        // Interactive Rewind Cursor
-        if sim.paused {
+        if sim.paused && sim.graph_mode != GraphMode::PhaseSpace3D {
             let (mx, my) = mouse_position();
             if mx >= margin_left && mx <= margin_left + plot_w && my >= margin_top && my <= margin_top + plot_h {
                 
@@ -649,7 +709,7 @@ async fn main() {
                     hovered_rewind_tick = Some(target_tick);
                     
                     let cx = tick_to_x(target_tick);
-                    let cy = if sim.git_tree_mode {
+                    let cy = if sim.graph_mode == GraphMode::GitTree {
                         if target_tick < sim.active_worldline.branch_tick && sim.active_worldline.parent_id.is_some() {
                             lane_to_y(get_visual_parent(sim.active_worldline.parent_id.unwrap(), target_tick))
                         } else {
@@ -672,7 +732,6 @@ async fn main() {
 
         let display_tick = hovered_rewind_tick.unwrap_or(sim.current_tick);
 
-        // --- NPC ARENA WINDOW OVERLAY ---
         if sim.show_npc_window {
             let win_w = 420.0;
             let win_h = 420.0;
@@ -735,7 +794,6 @@ async fn main() {
             draw_agent(&sim.active_worldline.states, active_color, Color::from_rgba(70, 255, 130, 150), 8.0, true);
         }
 
-        // --- 50-CHANNEL DATA GRID ---
         draw_text(&format!("QUANTUM CHANNELS @ T{} (Active | Ghost N-1)", display_tick), margin_left, margin_top + plot_h + 18.0, 16.0, GRAY);
         
         let grid_y = margin_top + plot_h + 35.0;
@@ -773,11 +831,15 @@ async fn main() {
             if is_npc { draw_text("]", x, cy, 16.0, LIGHTGRAY); }
         }
 
-        // --- UI STATUS & LEGEND ---
-        let status_str = if sim.paused { "PAUSED (Click graph to Rewind | SPACE: Resume | M: View | N: NPC)" }
-        else { "RUNNING (SPACE: Pause & Rewind | M: View Mode | N: NPC Arena)" };
+        let mut status_str = if sim.paused { "PAUSED (Click graph to Rewind | SPACE: Resume | M: View | N: NPC)".to_string() }
+        else { "RUNNING (SPACE: Pause & Rewind | M: View Mode | N: NPC Arena)".to_string() };
+        
+        if sim.graph_mode == GraphMode::PhaseSpace3D {
+            status_str = format!("{} | Right-Click: Rotate 3D Cube", status_str);
+        }
+        
         let status_col = if sim.paused { YELLOW } else { GREEN };
-        draw_text(status_str, margin_left, 30.0, 22.0, status_col);
+        draw_text(&status_str, margin_left, 30.0, 22.0, status_col);
 
         let total_secs = sim.max_ticks as f32 / UPDATES_PER_SEC;
         let mins = (total_secs / 60.0).floor() as u32;
@@ -796,9 +858,8 @@ async fn main() {
         };
         draw_text(&view_str, margin_left, 56.0, 17.0, LIGHTGRAY);
 
-        draw_text("Cyan: 0.0° Fate | Amber: Run N-1 | Green: Active | C/A/D: Ch | M: Git View | N: NPC | R: Reset", margin_left, screen_height() - 15.0, 17.5, GRAY);
+        draw_text("Cyan: 0.0° Fate | Amber: Run N-1 | Green: Active | C/A/D: Ch | M: Switch View | N: NPC | R: Reset", margin_left, screen_height() - 15.0, 17.5, GRAY);
 
-        // --- NIXIE DIVERGENCE METER ---
         let meter_w = 320.0;
         let meter_h = 65.0;
         let meter_x = screen_width() - meter_w - 25.0;
